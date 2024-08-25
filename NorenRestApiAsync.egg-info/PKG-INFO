@@ -1,24 +1,27 @@
 Metadata-Version: 2.1
-Name: NorenRestApi
+Name: NorenRestApiAsync
 Version: 0.0.30
 Summary: A package for NorenOMS
 Home-page: UNKNOWN
-Author: KumarAnand
-Author-email: kumar.anand@kambala.co.in
+Author: Nagaraju Gunda
+Author-email: gunda.nagaraju92@gmail.com
 License: UNKNOWN
 Platform: UNKNOWN
 Classifier: Programming Language :: Python :: 3
 Classifier: License :: Other/Proprietary License
 Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
 Description-Content-Type: text/markdown
-Requires-Dist: PyYAML
-Requires-Dist: pandas
-Requires-Dist: requests
-Requires-Dist: websocket-client
 
-# NorenApi
+# Shoonya API 
 
-Api used to connect to NorenOMS
+Api used to connect to Shoonya OMS.
+
+This is a python wrapper or connector to the RestAPI and websocket of Shoonya. 
+
+More details are found here
+https://www.shoonya.com/api-documentation
+
 ****
 
 ## Build
@@ -31,11 +34,12 @@ to build this package and install it on your server please use
 ****
 
 ## API 
-```NorenApi```
+```ShoonyaApi```
 - [login](#md-login)
 - [logout](#md-logout)
 
 Symbols
+- [scripmasters](#md-scripmasters)
 - [searchscrip](#md-searchscrip)
 - [get_security_info](#md-get_security_info)
 - [get_quotes](#md-get_quotes)
@@ -68,20 +72,24 @@ Websocket API
 - [unsubscribe](#md-unsubscribe)
 
 Example
+- [order states](#md-order-states)
 - [getting started](#md-example-basic)
 - [Market Functions](#md-example-market)
 - [Orders and Trade](#md-example-orders)
 
 #### <a name="md-login"></a> login(userid, password, twoFA, vendor_code, api_secret, imei)
 connect to the broker, only once this function has returned successfully can any other operations be performed
-Example: 
+Example:
+#For TOTP Automation, Reffer below Mentioned Command 
+#TOKEN = 'Q65C5R7WJ2AR77VA623OC2SI5D5KM447'
+#otp = pyotp.TOTP(TOKEN).now()
 ```
 #credentials
 user    = <uid>
 pwd     = <password>
-factor2 = <2nd factor>
+factor2 = <OTP/TOTP>
 vc      = <vendor code>
-app_key = <secret key>
+app_key = <API key>
 imei    = <imei>
 
 ret = api.login(userid=uid, password=pwd, twoFA=factor2, vendor_code=vc, api_secret=app_key, imei=imei)
@@ -90,12 +98,12 @@ Request Details :
 
 |Json Fields|Possible value|Description|
 | --- | --- | ---|
-|apkversion*||Application version.|
+|apkversion*||Application version.For Ex. 1.0.0|
 |uid*||User Id of the login user|
-|pwd*||Sha256 of the user entered password.|
-|factor2*||OTP or TOTP|
+|pwd*||Shoonya login password.|
+|factor2*||OTP or TOTP as entered by the user. (User Needs to be generated from the Shoonya app)|
 |vc*||Vendor code provided by noren team, along with connection URLs|
-|appkey*||Sha256 of  uid|vendor_key|
+|appkey*||Prism Generated API key|
 |imei*||Send mac if users logs in for desktop, imei is from mobile|
 |addldivinf||Optional field, Value must be in below format:|iOS - iosInfo.utsname.machine - iosInfo.systemVersion|Android - androidInfo.model - androidInfo.version|examples:|iOS - iPhone 8.0 - 9.0|Android - Moto G - 9 PKQ1.181203.01|
 |ipaddr||Optional field|
@@ -187,13 +195,13 @@ Request Details :
 | --- | --- | ---|
 |uid*||Logged in User Id|
 |actid*||Login users account ID|
-|exch*|NSE  / NFO / BSE / MCX|Exchange (Select from ‘exarr’ Array provided in User Details response)|
-|tsym*||Unique id of contract on which order to be placed. (use url encoding to avoid special char error for symbols like M&M)|
-|qty*||Order Quantity |
+|exch*|NSE  / NFO / CDS / MCX / BSE|Exchange (Select from ‘exarr’ Array provided in User Details response)|
+|tsym*|RELIANCE-EQ / L&TFH29SEP22P97 / USDINR25NOV22C76 / CRUDEOIL16NOV22P5400 / WHIRLPOOL |Unique id of contract on which order to be placed. (Use the Results from Search Script to get the trading symbol & use url encoding to avoid special char error for symbols like M&M)|
+|qty*|RELIANCE-EQ:-1 / NIFTY:-50 / BANKNIFTY:-25 |Order Quantity |
 |prc*||Order Price|
 |trgprc||Only to be sent in case of SL / SL-M order.|
 |dscqty||Disclosed quantity (Max 10% for NSE, and 50% for MCX)|
-|prd*|C / M / H|Product name (Select from ‘prarr’ Array provided in User Details response, and if same is allowed for selected, exchange. Show product display name, for user to select, and send corresponding prd in API call)|
+|prd*|C / M / I / B / H|Product name (Select from ‘prarr’ Array provided in User Details response, and if same is allowed for selected, exchange. Show product display name, for user to select, and send corresponding prd in API call)                  "C" For CNC, "M" FOR NRML, "I" FOR MIS, "B" FOR BRACKET ORDER, "H" FOR COVER ORDER|
 |trantype*|B / S|B -> BUY, S -> SELL|
 |prctyp*|LMT / MKT  / SL-LMT / SL-MKT / DS / 2L / 3L||||
 |ret*|DAY / EOS / IOC |Retention type (Show options as per allowed exchanges) |
@@ -585,8 +593,8 @@ Sample Success Output :
    {
        "stat": "Ok",
        "norenordno": "20121300065715",
-       "uid": "GURURAJ",
-       "actid": "GURURAJ",
+       "uid": "FA12345",
+       "actid": "FA12345",
        "exch": "NSE",
        "prctyp": "LMT",
        "ret": "DAY",
@@ -612,8 +620,8 @@ Sample Success Output :
    {
        "stat": "Ok",
        "norenordno": "20121300065716",
-       "uid": "GURURAJ",
-       "actid": "GURURAJ",
+       "uid": "FA12345",
+       "actid": "FA12345",
        "exch": "NSE",
        "prctyp": "LMT",
        "ret": "DAY",
@@ -707,8 +715,8 @@ Sample Success Output :
    {
        "stat": "Ok",
        "norenordno": "20121300065716",
-       "uid": "DEMO1",
-       "actid": "DEMO1",
+       "uid": "DEMO01",
+       "actid": "DEMO01",
        "exch": "NSE",
        "tsym": "ACCELYA-EQ",
        "qty": "180",
@@ -734,8 +742,8 @@ Sample Success Output :
    {
        "stat": "Ok",
        "norenordno": "20121300065716",
-       "uid": "DEMO1",
-       "actid": "DEMO1",
+       "uid": "DEMO01",
+       "actid": "DEMO01",
        "exch": "NSE",
        "tsym": "ACCELYA-EQ",
        "qty": "180",
@@ -1249,7 +1257,7 @@ Options greeeks computed the delta, thetha, vega , rho values.
 Example: 
 
 ```
-ret = api.option_greek(expiredate ='24-NOV-2022',StrikePrice='150',SpotPrice  = '200',InitRate  = '100',Volatility = '10',OptionType='5')
+ret = api.option_greek(expiredate ='24-NOV-2022',StrikePrice='150',SpotPrice  = '200',InitRate  = '100',Volatility = '10',OptionType='CE')
 ```
 Request Details :
 
@@ -1260,7 +1268,7 @@ Request Details :
 |sptprc*||Spot Price|
 |int_rate*||Init Rate|
 |volatility*||Volatility|
-|optt||Option Type|
+|optt|CE or PE|Option Type|
 
 Response Details :
 
@@ -1306,6 +1314,27 @@ Sample Failure Response :
  "stat":"Not_Ok",
  "emsg":"Invalid Input :  jData is Missing."
 }
+
+
+#### <a name="md-scripmasters"></a> scripmasters:
+
+The scrip masters can be downloaded from the following links
+
+https://api.shoonya.com/NSE_symbols.txt.zip
+
+https://api.shoonya.com/NFO_symbols.txt.zip
+
+https://api.shoonya.com/CDS_symbols.txt.zip
+
+https://api.shoonya.com/MCX_symbols.txt.zip
+
+https://api.shoonya.com/BSE_symbols.txt.zip
+
+https://api.shoonya.com/BFO_symbols.txt.zip
+
+example is provided in test/test_download_masters.py 
+
+##Since this is a huge file, users are recommended to download it once a day and store it locally.
 
 
 #### <a name="md-searchscrip"></a> searchscrip(exchange, searchtext):
@@ -1745,7 +1774,7 @@ Sample Failure Response :
 }
 
 #### <a name="md-get_time_price_series"></a> get_time_price_series(exchange, token, starttime, endtime, interval):
-gets the chart date for the symbol
+gets the chart data for the symbol
 
 Example:
 ```
@@ -1865,6 +1894,7 @@ Sample Failure Response :
      "emsg":"Session Expired : Invalid Session Key"
 }
 
+
 #### <a name="md-get_daily_price_series"></a>get_daily_price_series(Symbol name, From date, To date):
 gets the chart date for the symbol
 
@@ -1924,6 +1954,7 @@ Sample Success Response :
   }"
 ]
 
+
 #### <a name="md-get_optionchain"></a> get_option_chain(exchange, tradingsymbol, strikeprice, count):
 
 gets the contracts of related strikes
@@ -1955,6 +1986,7 @@ the response is as follows,
 | ls | ```string``` | False | Lot Size |
 
 #### <a name="md-start_websocket"></a> start_websocket()
+Note: Please ensure that only a single web-socket connection is started. Opening multiple web-socket connections is not supported by the API.
 starts the websocket, WebSocket feed has 2 types of ticks( t=touchline d=depth)and 2 stages (k=acknowledgement, f=further change in tick). 
 
 | Param | Type | Optional |Description |
@@ -2012,7 +2044,7 @@ Order Update subscription Updates :
 
 
 #### <a name="md-subscribe"></a> subscribe([instruments])
-send a list of instruments to watch
+send a list of instruments to watch, feed_type specifies the type of data requested ( t=touchline d=depth)
 
 t='tk' is sent once on subscription for each instrument. this will have all the fields with the most recent value
 thereon t='tf' is sent for fields that have changed.
@@ -2084,30 +2116,137 @@ Accept for t, e, and tk other fields may / may not be present.
 | sq1  | | Best Sell Quantity 1 |
 | sp1  | | Best Sell Price 1|
 
+Depth Messages will be as below 
+
+|Json Fields|Possible value|Description|
+| --- | --- | --- | 
+|t|dk|?dk? represents depth acknowledgement|
+|e|NSE, BSE, NFO ..|Exchange name|
+|tk|22|Scrip Token|
+|lp||LTP|
+|pc||Percentage change|
+|v||volume|
+|o||Open price|
+|h||High price|
+|l||Low price|
+|c||Close price|
+|ap||Average trade price|
+|ltt||Last trade time|
+|ltq||Last trade quantity|
+|tbq||Total Buy Quantity|
+|tsq||Total Sell Quantity|
+|bq1 ||Best Buy Quantity 1|
+|bq2||Best Buy Quantity 2|
+|bq3 ||Best Buy Quantity 3|
+|bq4 ||Best Buy Quantity 4|
+|bq5 ||Best Buy Quantity 5|
+|bp1 ||Best Buy Price 1|
+|bp2||Best Buy Price 2|
+|bp3 ||Best Buy Price 3|
+|bp4 ||Best Buy Price 4|
+|bp5 ||Best Buy Price 5|
+|bo1 ||Best Buy Orders 1|
+|bo2||Best Buy Orders 2|
+|bo3 ||Best Buy Orders 3|
+|bo4 ||Best Buy Orders 4|
+|bo5 ||Best Buy Orders 5|
+|sq1 ||Best Sell Quantity 1|
+|sq2||Best Sell Quantity 2|
+|sq3 ||Best Sell Quantity 3|
+|sq4 ||Best Sell Quantity 4|
+|sq5 ||Best Sell Quantity 5|
+|sp1 ||Best Sell Price 1|
+|sp2||Best Sell Price 2|
+|sp3 ||Best Sell Price 3|
+|sp4 ||Best Sell Price 4|
+|sp5 ||Best Sell Price 5|
+|so1 ||Best Sell Orders 1|
+|so2||Best Sell Orders 2|
+|so3 ||Best Sell Orders 3|
+|so4 ||Best Sell Orders 4|
+|so5 ||Best Sell Orders 5|
+|lc||Lower Circuit Limit|
+|uc||Upper Circuit Limit|
+|52h||52 week high low in other exchanges, Life time high low in mcx|
+|52l||52 week high low in other exchanges, Life time high low in mcx|
+|oi||Open interest|
+|poi||Previous day closing Open Interest|
+|toi||Total open interest for underlying|
+|ft ||Feed time||
+
 #### <a name="md-unsubscribe"></a> unsubscribe()
 send a list of instruments to stop watch
 
 ****
+## <a name="md-example-basic"></a> Order States and Report Types
+
+Possible Values for Order States are as follows
+
+PENDING :- The order has been submitted but is awaiting further processing.
+
+CANCELED :- The order has been canceled by the trader before being executed.
+
+OPEN:- The order is active and waiting to be matched with a counterparty.
+
+REJECTED:- The order has been declined due to certain criteria not being met.
+
+COMPLETE:- The order has been successfully executed and completed.
+
+TRIGGER_PENDING:- A specific condition must be met before the order can become active.
+
+INVALID_STATUS_TYPE:- The provided order status is not recognized or valid.
+
+### The Orders will have a request status or report type for modify/cancel the possible values are as follows
+
+NewAck :- acknowledgement that a new order request has been received.
+
+ModAck :- acknowledgement that a modification request for an existing order has been received.
+
+CanAck :- acknowledgement that a request to cancel an order has been received.
+
+PendingNew :- The request to place a new order is pending further review.
+
+PendingReplace :- The request to modify an existing order is pending further review.
+
+PendingCancel :- The request to cancel an order is pending further review.
+
+New :- Confirmation that a new order has been successfully placed.
+
+Replaced :- confirmation that an existing order has been successfully modified.
+
+Canceled :- confirmation that an order has been successfully canceled.
+
+Fill :- notification that an order has been fully or partially executed.
+
+Rejected :- notification that an order has been rejected and not executed.
+
+ReplaceRejected :- Notification that a request to modify an order has been rejected.
+
+CancelRejected :- Notification that a request to cancel an order has been rejected.
+
+INVALID_REPORT_TYPE :- The provided report type for modification/cancellation is not recognized or valid.
+
+
 ## <a name="md-example-basic"></a> Example - Getting Started
 First configure the endpoints in the api_helper constructor. 
 Thereon provide your credentials and login as follows.
 
 ```python
-from api_helper import NorenApiPy
+from api_helper import ShoonyaApiPy
 import logging
 
 #enable dbug to see request and responses
 logging.basicConfig(level=logging.DEBUG)
 
 #start of our program
-api = NorenApiPy()
+api = ShoonyaApiPy()
 
 #credentials
 user        = '< user id>'
 u_pwd       = '< password >'
-factor2     = 'second factor'
+factor2     = 'OTP/TOTP'
 vc          = 'vendor code'
-app_key     = 'secret key'
+app_key     = 'API key'
 imei        = 'uniq identifier'
 
 
@@ -2343,6 +2482,12 @@ while(feed_opened==False):
 
 ****
 
+## Contact Us
+
+For any queries, feel free to reach us, by email at apisupport@shoonya.com or call at 0172-4740000
+& Also Just visit our website there is a Live chat option.
+
+****
 ## Author
 
 Kumar Anand
@@ -2351,10 +2496,7 @@ Kumar Anand
 
 ## License
 
-Copyright (C) 2021 Kambala Solutions Pvt Ltd- All Rights Reserved
-Copying of this file, via any medium is strictly prohibited.
-Proprietary and confidential.
-All file transfers are logged.
+Copyright (C) 2021 Kambala Solutions Pvt Ltd- All Rights Reserved Copying of this file, via any medium is strictly prohibited. Proprietary and confidential. All file transfers are logged.
 
 ****
 
