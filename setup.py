@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="NorenRestApiAsync",
-    version="0.0.30",
+    version="0.0.31",
     author="Nagaraju Gunda",
     author_email="gunda.nagaraju92@gmail.com",
     description="A package for NorenOMS",
@@ -15,6 +15,8 @@ setup(
         "pandas",
         "requests",
         "websockets",
+        "aiohttp",
+        "aiodns",
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

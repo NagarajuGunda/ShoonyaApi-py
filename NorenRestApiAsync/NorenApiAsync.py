@@ -1,14 +1,27 @@
-import json
-import aiohttp
 import asyncio
-import websockets
-import logging
-import enum
 import datetime
 import hashlib
+import json
+import logging
+import os
+import socket
 import time
-import urllib
+import urllib.parse
 from datetime import datetime as dt
+from types import SimpleNamespace
+from typing import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
+
+import aiohttp
+import pyotp
+import websockets
+import yaml
+from aiohttp.resolver import AsyncResolver
 
 logger = logging.getLogger(__name__)
 
@@ -101,22 +114,103 @@ class NorenApiAsync:
         #'eoddata_endpoint' : 'http://eodhost/'
     }
 
+    @staticmethod
+    async def on_request_start(
+        session: aiohttp.ClientSession,
+        trace_config_ctx: SimpleNamespace,
+        params: aiohttp.TraceRequestStartParams,
+    ) -> None:
+        trace_config_ctx.start = asyncio.get_event_loop().time()
+        logger.debug(
+            " Request Hook: Initiated HTTP.%s Request To Url: %s | With Header: %s |",
+            params.method,
+            params.url,
+            json.dumps(dict(params.headers)),
+        )  # noqa E501
+        print("\n")
+
+    @staticmethod
+    async def on_request_end(
+        session: aiohttp.ClientSession,
+        trace_config_ctx: SimpleNamespace,
+        params: aiohttp.TraceRequestEndParams,
+    ) -> None:
+        elapsed = asyncio.get_event_loop().time() - trace_config_ctx.start
+        elapsed_msg = f"{elapsed:.3f} Seconds"
+        text = await params.response.text()
+        if len(text) > 500:
+            text = f"{text[:500]}...Truncated to 500 Characters."
+        logger.debug(
+            " Response Hook: The HTTP.%s Request To Url: %s | Completed In %s | Response Status: %s %s | Response Header: %s | Response Content: %s |",
+            params.method,
+            params.url,
+            elapsed_msg,
+            params.response.status,
+            params.response.reason,
+            json.dumps(dict(params.headers)),
+            text,
+        )
+        print("\n")
+
+    @staticmethod
+    async def on_request_exception(
+        session: aiohttp.ClientSession,
+        trace_config_ctx: SimpleNamespace,
+        params: aiohttp.TraceRequestExceptionParams,
+    ) -> None:
+        logger.debug(
+            " Request Exception Hook: The HTTP.%s Request To Url: %s | Request Header: %s | Failed With Exception: %s |",
+            params.method,
+            params.url,
+            json.dumps(dict(params.headers)),
+            str(params.exception),
+        )
+        print("\n")
+
+    @staticmethod
+    async def generate_async_client_session(
+        base_url: str,
+        connector: aiohttp.TCPConnector,
+        headers: Dict[str, Union[str, Any]],
+        timeout: aiohttp.ClientTimeout,
+        raise_for_status: bool,
+        trust_env: bool,
+        trace_configs: Optional[List[aiohttp.TraceConfig]] = None,
+        cookie_jar: Optional[aiohttp.CookieJar] = None,
+    ) -> aiohttp.ClientSession:
+        return aiohttp.ClientSession(
+            base_url=base_url,
+            connector=connector,
+            headers=headers,
+            timeout=timeout,
+            cookie_jar=cookie_jar,
+            raise_for_status=raise_for_status,
+            trust_env=trust_env,
+            trace_configs=trace_configs,
+        )
+
     def __init__(self, host, websocket):
-        self.__service_config["host"] = host
+        parsed_url = urllib.parse.urlparse(host)
+        self.__service_config["host"] = parsed_url.hostname
+        self.__service_config["scheme"] = parsed_url.scheme
+        self.__service_config["path"] = parsed_url.path
         self.__service_config["websocket_endpoint"] = websocket
-        # self.__service_config['eoddata_endpoint'] = eodhost
 
         self.__websocket = None
         self.__websocket_connected = False
         self.__ws_mutex = asyncio.Lock()
         self.__on_error = None
-        self.__on_disconnect = None
         self.__on_open = None
         self.__subscribe_callback = None
         self.__order_update_callback = None
-        self.__subscribers = {}
-        self.__market_status_messages = []
-        self.__exchange_messages = []
+        self._default_timeout = 10
+        self.debug = False
+        self.__reqsession = None
+        self.__connector = None
+        self.__user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        self.__headers = {
+            "User-Agent": self.__user_agent,
+        }
 
     async def __ws_run_forever(self):
         while not self.__stop_event.is_set():
@@ -208,9 +302,41 @@ class NorenApiAsync:
             await self.__websocket.close()
         await self.__ws_task
 
+    async def __initialize_session_params(self) -> None:
+        self.__timeout = aiohttp.ClientTimeout(
+            total=float(self._default_timeout)
+        )  # noqa E501
+        self.__resolver = AsyncResolver(nameservers=["1.1.1.1", "1.0.0.1"])
+        self.__connector = aiohttp.TCPConnector(
+            limit=100,
+            limit_per_host=0,
+            ttl_dns_cache=22500,
+            use_dns_cache=True,
+            resolver=self.__resolver,
+            family=socket.AF_INET,
+        )
+        cookie_jar = aiohttp.CookieJar()
+        self.__trace_config = aiohttp.TraceConfig()
+        self.__trace_config.on_request_start.append(self.on_request_start)
+        self.__trace_config.on_request_end.append(self.on_request_end)
+        self.__trace_config.on_request_exception.append(self.on_request_exception)
+        self.__reqsession = await self.generate_async_client_session(
+            base_url=f'{self.__service_config["scheme"]}://{self.__service_config["host"]}',
+            connector=self.__connector,
+            headers=self.__headers,
+            timeout=self.__timeout,
+            raise_for_status=True,
+            trust_env=True,
+            trace_configs=[self.__trace_config] if self.debug else None,
+            cookie_jar=cookie_jar,
+        )
+        await self.__reqsession.get("/")
+
     async def login(self, userid, password, twoFA, vendor_code, api_secret, imei):
+        await self.__initialize_session_params()
+
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['authorize']}"
+        url = f"{config['path']}{config['routes']['authorize']}"
 
         pwd = hashlib.sha256(password.encode("utf-8")).hexdigest()
         u_app_key = f"{userid}|{api_secret}"
@@ -230,23 +356,20 @@ class NorenApiAsync:
         payload = "jData=" + json.dumps(values)
         await reportmsg("Req:" + payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg("Reply:" + text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg("Reply:" + text)
+            resDict = json.loads(text)
 
         self.__username = userid
         self.__accountid = userid
         self.__password = password
-        self.__susertoken = resDict["susertoken"]
+        self.__susertoken = resDict.get("susertoken")
 
         return resDict
 
     async def set_session(self, userid, password, usertoken):
+        await self.__initialize_session_params()
 
         self.__username = userid
         self.__accountid = userid
@@ -266,14 +389,10 @@ class NorenApiAsync:
         payload = "jData=" + json.dumps(values)
         await reportmsg("Req:" + payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg("Reply:" + text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg("Reply:" + text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -287,14 +406,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         self.__username = None
         self.__accountid = None
@@ -353,14 +468,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -374,14 +485,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -400,14 +507,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -426,14 +529,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -456,7 +555,7 @@ class NorenApiAsync:
         trail_price=0.0,
     ):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['placeorder']}"
+        url = f"{config['path']}{config['routes']['placeorder']}"
 
         values = {
             "ordersource": "API",
@@ -490,14 +589,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -515,7 +610,7 @@ class NorenApiAsync:
         trail_price=0.0,
     ):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['modifyorder']}"
+        url = f"{config['path']}{config['routes']['modifyorder']}"
 
         values = {
             "ordersource": "API",
@@ -547,20 +642,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def cancel_order(self, orderno):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['cancelorder']}"
+        url = f"{config['path']}{config['routes']['cancelorder']}"
 
         values = {
             "ordersource": "API",
@@ -572,20 +663,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def exit_order(self, orderno, product_type):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['exitorder']}"
+        url = f"{config['path']}{config['routes']['exitorder']}"
 
         values = {
             "ordersource": "API",
@@ -598,14 +685,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -620,7 +703,7 @@ class NorenApiAsync:
         day_or_cf,
     ):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['product_conversion']}"
+        url = f"{config['path']}{config['routes']['product_conversion']}"
 
         values = {
             "ordersource": "API",
@@ -639,20 +722,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def single_order_history(self, orderno):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['singleorderhistory']}"
+        url = f"{config['path']}{config['routes']['singleorderhistory']}"
 
         values = {"ordersource": "API", "uid": self.__username, "norenordno": orderno}
 
@@ -660,20 +739,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_order_book(self):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['orderbook']}"
+        url = f"{config['path']}{config['routes']['orderbook']}"
 
         values = {"ordersource": "API", "uid": self.__username}
 
@@ -681,20 +756,37 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
+    def __del__(self):
+        if self.__reqsession or self.__connector:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(self.cleanup())
+                else:
+                    loop.run_until_complete(self.cleanup())
+            except RuntimeError:
+                # If there's no event loop, we can't do async cleanup
+                print("Warning: Unable to perform async cleanup in __del__")
+
+    async def cleanup(self):
+        if self.__reqsession:
+            await self.__reqsession.close()
+            self.__reqsession = None
+        if self.__connector:
+            await self.__connector.close()
+            self.__connector = None
+        logger.debug("Cleanup completed")
+
     async def get_trade_book(self):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['tradebook']}"
+        url = f"{config['path']}{config['routes']['tradebook']}"
 
         values = {
             "ordersource": "API",
@@ -706,20 +798,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def searchscrip(self, exchange, searchtext):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['searchscrip']}"
+        url = f"{config['path']}{config['routes']['searchscrip']}"
 
         if searchtext is None:
             await reporterror("search text cannot be null")
@@ -735,20 +823,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_option_chain(self, exchange, tradingsymbol, strikeprice, count=2):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['optionchain']}"
+        url = f"{config['path']}{config['routes']['optionchain']}"
 
         values = {
             "uid": self.__username,
@@ -762,20 +846,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_security_info(self, exchange, token):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['scripinfo']}"
+        url = f"{config['path']}{config['routes']['scripinfo']}"
 
         values = {"uid": self.__username, "exch": exchange, "token": token}
 
@@ -783,20 +863,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_quotes(self, exchange, token):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['getquotes']}"
+        url = f"{config['path']}{config['routes']['getquotes']}"
         await reportmsg(url)
 
         values = {"uid": self.__username, "exch": exchange, "token": token}
@@ -805,14 +881,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if resDict["stat"] != "Ok":
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -820,7 +892,7 @@ class NorenApiAsync:
         self, exchange, token, starttime=None, endtime=None, interval=None
     ):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['TPSeries']}"
+        url = f"{config['path']}{config['routes']['TPSeries']}"
         await reportmsg(url)
 
         if starttime is None:
@@ -842,14 +914,10 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -857,7 +925,7 @@ class NorenApiAsync:
         self, exchange, tradingsymbol, startdate=None, enddate=None
     ):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['get_daily_price_series']}"
+        url = f"{config['path']}{config['routes']['get_daily_price_series']}"
         await reportmsg(url)
 
         if startdate is None:
@@ -878,23 +946,22 @@ class NorenApiAsync:
         await reportmsg(payload)
 
         headers = {"Content-Type": "application/json; charset=utf-8"}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload, headers=headers) as response:
-                if response.status != 200:
-                    return None
-                text = await response.text()
-                if len(text) == 0:
-                    return None
-                resDict = json.loads(text)
 
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(
+            url, data=payload, headers=headers
+        ) as response:
+            if response.status != 200:
+                return None
+            text = await response.text()
+            if len(text) == 0:
+                return None
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_holdings(self, product_type=None):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['holdings']}"
+        url = f"{config['path']}{config['routes']['holdings']}"
         await reportmsg(url)
 
         if product_type is None:
@@ -910,20 +977,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_limits(self, product_type=None, segment=None, exchange=None):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['limits']}"
+        url = f"{config['path']}{config['routes']['limits']}"
         await reportmsg(url)
 
         values = {
@@ -944,17 +1007,16 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def get_positions(self):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['positions']}"
+        url = f"{config['path']}{config['routes']['positions']}"
         await reportmsg(url)
 
         values = {
@@ -965,20 +1027,16 @@ class NorenApiAsync:
         payload = "jData=" + json.dumps(values) + f"&jKey={self.__susertoken}"
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
-
-        if not isinstance(resDict, list):
-            return None
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
     async def span_calculator(self, actid, positions: list):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['span_calculator']}"
+        url = f"{config['path']}{config['routes']['span_calculator']}"
         await reportmsg(url)
 
         senddata = {"actid": self.__accountid, "pos": positions}
@@ -989,11 +1047,10 @@ class NorenApiAsync:
         )
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
 
@@ -1001,7 +1058,7 @@ class NorenApiAsync:
         self, expiredate, StrikePrice, SpotPrice, InterestRate, Volatility, OptionType
     ):
         config = NorenApiAsync.__service_config
-        url = f"{config['host']}{config['routes']['option_greek']}"
+        url = f"{config['path']}{config['routes']['option_greek']}"
         await reportmsg(url)
 
         values = {
@@ -1019,10 +1076,92 @@ class NorenApiAsync:
 
         await reportmsg(payload)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=payload) as response:
-                text = await response.text()
-                await reportmsg(text)
-                resDict = json.loads(text)
+        async with self.__reqsession.post(url, data=payload) as response:
+            text = await response.text()
+            await reportmsg(text)
+            resDict = json.loads(text)
 
         return resDict
+
+
+if __name__ == "__main__":
+
+    async def main():
+        cred = None
+        with open("cred.yml") as f:
+            creds = yaml.load(f, Loader=yaml.FullLoader)
+
+            if creds is None or "Finvasia" not in creds:
+                raise ValueError("No credentials found")
+
+            cred = creds["Finvasia"]
+
+        api = NorenApiAsync(
+            host="https://api.shoonya.com/NorenWClientTP/",
+            websocket="wss://api.shoonya.com/NorenWSTP/",
+        )
+
+        userToken = None
+        tokenFile = "shoonyakey.txt"
+        if os.path.exists(tokenFile) and (
+            datetime.datetime.fromtimestamp(os.path.getmtime(tokenFile)).date()
+            == datetime.datetime.today().date()
+        ):
+            logger.info("Token has been created today already. Re-using it")
+            with open(tokenFile, "r") as f:
+                userToken = f.read()
+            logger.info(
+                f"userid {cred['user']} password ******** usertoken {userToken}"
+            )
+            loginStatus = await api.set_session(
+                userid=cred["user"], password=cred["pwd"], usertoken=userToken
+            )
+        else:
+            logger.info("Logging in and persisting user token")
+            loginStatus = await api.login(
+                userid=cred["user"],
+                password=cred["pwd"],
+                twoFA=pyotp.TOTP(cred["factor2"]).now(),
+                vendor_code=cred["vc"],
+                api_secret=cred["apikey"],
+                imei=cred["imei"],
+            )
+
+            if loginStatus:
+                with open(tokenFile, "w") as f:
+                    f.write(loginStatus.get("susertoken"))
+
+                logger.info(
+                    f"{loginStatus.get('uname')}={loginStatus.get('stat')} token={loginStatus.get('susertoken')}"
+                )
+            else:
+                raise ValueError("Login failed")
+
+        order1 = await api.place_order(
+            buy_or_sell="B",
+            product_type="C",
+            exchange="NSE",
+            tradingsymbol="YESBANK-EQ",
+            quantity=1,
+            discloseqty=0,
+            price_type="LMT",
+            price=20,
+            trigger_price=None,
+            retention="DAY",
+            remarks="my_order_001",
+        )
+
+        print(order1)
+
+        order2 = await api.modify_order(
+            orderno=order1["norenordno"],
+            exchange="NSE",
+            tradingsymbol="YESBANK-EQ",
+            newquantity=1,
+            newprice_type="LMT",
+            newprice=18,
+        )
+
+        print(order2)
+
+    asyncio.run(main())
